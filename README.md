@@ -332,7 +332,8 @@ The package contents are limited by the `files` field in `package.json`:
 
 ## Notes
 
-- Commands such as `AT+IPR`, `AT+KBDEN`, `AT&W`, and `AT&F` may save configuration or reboot the module. The browser serial connection may need to reconnect afterward.
+- Commands such as `AT+IPR`, `AT+KBDEN`, `AT&W`, and `AT&F` may save configuration, change the module baud rate, or reboot the module. Close the client and reconnect with the new baud rate afterward.
+- A command timeout marks the client as no longer synchronized. Close and reopen it before sending more commands, so late serial responses cannot be mistaken for the next command.
 - M1 block writes, NTAG page writes, and ISO15693 block writes modify real card data. Check the address and data length before testing.
 - WebSerial requires the user to grant serial port access manually. The browser cannot show the port picker outside a user gesture.
 - The default command timeout is 3000 ms. APDU and long read operations can override it with `{ timeoutMs }`.

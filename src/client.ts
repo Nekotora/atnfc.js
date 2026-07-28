@@ -53,9 +53,11 @@ export class AtNfcClient {
   private queue: Promise<void> = Promise.resolve();
   private pending: PendingCommand | undefined;
   private readBuffer = "";
+  private opening: Promise<void> | undefined;
   private reading = false;
   private opened = false;
   private closed = false;
+  private connectionError: Error | undefined;
   private listeners = new Map<keyof AtNfcEventMap, Set<(value: unknown) => void>>();
 
   constructor(transport: AtNfcTransport, options: AtNfcClientOptions = {}) {
@@ -82,16 +84,31 @@ export class AtNfcClient {
 
   async open(): Promise<void> {
     if (this.opened) return;
+    if (this.opening) return this.opening;
+    this.assertConnectionUsable();
 
     this.closed = false;
-    await this.transport.open?.();
-    this.opened = true;
-    this.startReader();
+    this.opening = (async () => {
+      await this.transport.open?.();
+      this.opened = true;
+      this.startReader();
+    })();
+
+    try {
+      await this.opening;
+    } catch (error) {
+      this.closed = true;
+      this.opened = false;
+      throw error;
+    } finally {
+      this.opening = undefined;
+    }
   }
 
   async close(): Promise<void> {
     this.closed = true;
     this.opened = false;
+    this.connectionError = undefined;
 
     if (this.pending) {
       clearTimeout(this.pending.timer);
@@ -115,10 +132,12 @@ export class AtNfcClient {
       const response = new Promise<AtCommandResponse>((resolve, reject) => {
         const timeoutMs = options.timeoutMs ?? this.timeoutMs;
         const timer = setTimeout(() => {
+          const error = new AtNfcTimeoutError(normalized, timeoutMs);
           if (this.pending?.command === normalized) {
             this.pending = undefined;
           }
-          reject(new AtNfcTimeoutError(normalized, timeoutMs));
+          this.invalidateConnection(error);
+          reject(error);
         }, timeoutMs);
 
         this.pending = {
@@ -456,10 +475,11 @@ export class AtNfcClient {
       }
     } catch (error) {
       if (!this.closed) {
-        this.emit("error", error);
+        const connectionError = this.invalidateConnection(error);
+        this.emit("error", connectionError);
         if (this.pending) {
           clearTimeout(this.pending.timer);
-          this.pending.reject(error);
+          this.pending.reject(connectionError);
           this.pending = undefined;
         }
       }
@@ -527,6 +547,24 @@ export class AtNfcClient {
     for (const listener of listeners) {
       listener(value);
     }
+  }
+
+  private assertConnectionUsable(): void {
+    if (this.connectionError) {
+      throw new Error("ATNFC connection is no longer synchronized. Close and reopen the client before sending more commands.", {
+        cause: this.connectionError
+      });
+    }
+  }
+
+  private invalidateConnection(error: unknown): Error {
+    const connectionError = error instanceof Error ? error : new Error(String(error));
+    this.connectionError = connectionError;
+    this.closed = true;
+    this.opened = false;
+    this.opening = undefined;
+    void this.transport.close?.().catch((closeError: unknown) => this.emit("error", closeError));
+    return connectionError;
   }
 }
 

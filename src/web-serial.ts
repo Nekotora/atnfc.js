@@ -33,6 +33,7 @@ export class WebSerialTransport implements AtNfcTransport {
   readonly openOptions: WebSerialOpenOptions;
 
   private reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  private closing: Promise<void> | undefined;
   private isOpen = false;
 
   constructor(port: WebSerialPortLike, openOptions: WebSerialOpenOptions = {}) {
@@ -67,6 +68,7 @@ export class WebSerialTransport implements AtNfcTransport {
 
   async open(): Promise<void> {
     if (this.isOpen) return;
+    if (this.closing) await this.closing;
 
     const options: Required<Pick<WebSerialOpenOptions, "baudRate">> & Omit<WebSerialOpenOptions, "baudRate"> = {
       baudRate: this.openOptions.baudRate ?? 115200
@@ -84,10 +86,26 @@ export class WebSerialTransport implements AtNfcTransport {
   }
 
   async close(): Promise<void> {
+    if (this.closing) return this.closing;
+
+    this.closing = this.closeInner();
+    try {
+      await this.closing;
+    } finally {
+      this.closing = undefined;
+    }
+  }
+
+  private async closeInner(): Promise<void> {
     if (this.reader) {
-      await this.reader.cancel().catch(() => undefined);
-      this.reader.releaseLock();
+      const reader = this.reader;
       this.reader = undefined;
+      await reader.cancel().catch(() => undefined);
+      try {
+        reader.releaseLock();
+      } catch {
+        // The read loop may have released the lock after observing stream closure.
+      }
     }
 
     if (this.isOpen) {
@@ -117,7 +135,10 @@ export class WebSerialTransport implements AtNfcTransport {
     this.reader ??= this.port.readable.getReader();
     const { value, done } = await this.reader.read();
     if (done) {
-      return new Uint8Array();
+      this.reader.releaseLock();
+      this.reader = undefined;
+      this.isOpen = false;
+      throw new Error("Serial port stream closed");
     }
 
     return value ?? new Uint8Array();
