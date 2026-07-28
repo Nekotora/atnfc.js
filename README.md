@@ -1,27 +1,30 @@
 # atnfc.js
 
-`atnfc.js` 是一个用于 ATNFC 串口 NFC 模块的 TypeScript 客户端库。它把模块的 AT 文本协议封装成可类型提示的 API，同时保留 `command()` 原始入口，方便你直接调用固件新增或暂未封装的指令。
+English | [简体中文](./README_zh.md)
 
-当前根据仓库内的 [AT_COMMAND_REFERENCE.md](./AT_COMMAND_REFERENCE.md) 实现，覆盖 ATNFC-102 / ATNFC-103 的常用寻卡、UID、M1、NTAG、ISO15693、APDU、配置、蜂鸣器、HID 键盘等能力。
+`atnfc.js` is a TypeScript client library for ATNFC serial NFC modules. It wraps the module's text-based AT protocol in a typed API, while keeping a raw `command()` entry point for firmware commands that are new or not wrapped yet.
 
-## 特性
+The implementation follows [AT_COMMAND_REFERENCE.md](./AT_COMMAND_REFERENCE.md) in this repository. It covers common ATNFC-102 / ATNFC-103 features, including card discovery, UID reads, M1, NTAG, ISO15693, APDU, configuration, buzzer control, and HID keyboard commands.
 
-- TypeScript 编写，发布时输出 ESM 与 `.d.ts` 类型声明。
-- 核心库零运行时依赖，传输层可替换。
-- 内置浏览器 WebSerial 适配器：`atnfc.js/web-serial`。
-- AT 命令自动排队，避免并发写串口导致响应串线。
-- 自动解析 `OK`、`+CME ERROR:XX`、`+FIND`、`+SYSCFG` 等常见响应。
-- 附带 React + Vite example page，可在 Chrome / Edge 里通过 WebSerial 演示读写。
+## Features
 
-## 安装
+- Written in TypeScript, with ESM output and `.d.ts` declarations.
+- No runtime dependencies in the core library.
+- Replaceable transport layer.
+- Built-in browser WebSerial adapter: `atnfc.js/web-serial`.
+- Queues AT commands automatically to avoid mixed serial responses from concurrent writes.
+- Parses common responses such as `OK`, `+CME ERROR:XX`, `+FIND`, and `+SYSCFG`.
+- Includes a React + Vite example page for WebSerial demos in Chrome and Edge.
+
+## Installation
 
 ```bash
 npm install atnfc.js
 ```
 
-浏览器示例需要 WebSerial，通常要求 HTTPS 或 `localhost`，并且目前主要由 Chromium 系浏览器支持。
+The browser example uses WebSerial. It usually requires HTTPS or `localhost`, and is mainly supported by Chromium-based browsers.
 
-## 快速开始：WebSerial
+## Quick start: WebSerial
 
 ```ts
 import { AtNfcClient } from "atnfc.js";
@@ -46,9 +49,9 @@ console.log(card.uid, card.typeName);
 await nfc.close();
 ```
 
-## 快速开始：自定义传输层
+## Quick start: custom transport
 
-核心库只要求传入一个 `AtNfcTransport`，所以 Node 串口、蓝牙串口或测试桩都可以接入。
+The core library only needs an `AtNfcTransport`, so you can plug in a Node serial port, Bluetooth serial connection, or a test stub.
 
 ```ts
 import { AtNfcClient, type AtNfcTransport } from "atnfc.js";
@@ -57,10 +60,10 @@ const transport: AtNfcTransport = {
   async open() {},
   async close() {},
   async write(data) {
-    // 写入 AT 命令字节，例如 AT+UID\r\n
+    // Write AT command bytes, for example AT+UID\r\n
   },
   async read() {
-    // 返回串口收到的一段 Uint8Array
+    // Return one Uint8Array chunk received from the serial port
     return new Uint8Array();
   }
 };
@@ -68,9 +71,9 @@ const transport: AtNfcTransport = {
 const nfc = new AtNfcClient(transport);
 ```
 
-## 核心 API
+## Core API
 
-### 连接与原始命令
+### Connection and raw commands
 
 ```ts
 await nfc.open();
@@ -82,13 +85,13 @@ const response = await nfc.command("AT+GMR");
 console.log(response.dataLines); // ["+GMR:10"]
 ```
 
-`command()` 会等待模块返回 `OK` 或 `+CME ERROR:XX`。如果模块返回错误，库会抛出 `AtNfcCmeError`，其中包含：
+`command()` waits for the module to return `OK` or `+CME ERROR:XX`. If the module returns an error, the library throws `AtNfcCmeError` with:
 
-- `code`：如 `E1`、`03`。
-- `command`：触发错误的 AT 命令。
-- `responseLines`：错误前已收到的响应行。
+- `code`, such as `E1` or `03`.
+- `command`, the AT command that triggered the error.
+- `responseLines`, the response lines received before the error.
 
-### 模块信息
+### Module information
 
 ```ts
 await nfc.getManufacturer();
@@ -99,11 +102,11 @@ await nfc.getSerialNumber();
 const info = await nfc.getInfo();
 ```
 
-### 寻卡与基础 NFC
+### Card discovery and basic NFC
 
 ```ts
 const card = await nfc.findCard(31);
-// 31 = A/B/V/F/身份证 全开
+// 31 = enable A/B/V/F/ID card discovery
 
 console.log(card.uid);
 console.log(card.type);     // "02"
@@ -117,13 +120,13 @@ await nfc.power(true);
 await nfc.power(false);
 ```
 
-`findCard()` 会根据 `type` 尽量解析扩展字段：
+`findCard()` parses extra fields from `type` when possible:
 
-- Mifare / NTAG / Type 1 Tag：`sak`、`atqa`
-- ISO14443A CPU / Desfire：`sak`、`atqa`、可选 `atr`
-- ISO14443B CPU：`atqb`
-- ISO15693：`afi`、`dsfid`
-- FeliCa：`pmm`、`systemCode`
+- Mifare / NTAG / Type 1 Tag: `sak`, `atqa`
+- ISO14443A CPU / Desfire: `sak`, `atqa`, optional `atr`
+- ISO14443B CPU: `atqb`
+- ISO15693: `afi`, `dsfid`
+- FeliCa: `pmm`, `systemCode`
 
 ### Mifare Classic
 
@@ -148,7 +151,7 @@ await nfc.writeNtag(4, "00112233445566778899AABB");
 
 ### NDEF / URL / Wi-Fi / vCard
 
-NDEF 高阶 API 面向 NFC Forum Type 2 Tag，默认从 NTAG 的 page 4 写入 TLV：`03 <len> <NDEF message> FE`。普通手机读 URL、Wi-Fi、名片时，一般就是识别这类 NDEF 数据。
+The high-level NDEF API targets NFC Forum Type 2 Tags. By default, it writes TLV data starting from NTAG page 4: `03 <len> <NDEF message> FE`. Phones usually read URLs, Wi-Fi credentials, and contact cards from this kind of NDEF data.
 
 ```ts
 import { encodeTextRecord } from "atnfc.js";
@@ -176,7 +179,7 @@ await nfc.writeNdefToNtag([
 ]);
 ```
 
-也可以直接使用 NDEF 工具函数：
+You can also use the NDEF utilities directly:
 
 ```ts
 import {
@@ -204,7 +207,7 @@ const data = await nfc.readIso15693(0, 4);
 await nfc.writeIso15693(0, "0011223344556677");
 ```
 
-### APDU 与协议通道
+### APDU and protocol exchange
 
 ```ts
 const sw = await nfc.apdu("00A4040007A0000003330101");
@@ -217,7 +220,7 @@ const mifare = await nfc.protocolExchange("MIFARE", "2601", { crc: true, fwi: 4 
 const idCard = await nfc.idCard("00A4040007A0000003330101");
 ```
 
-### 配置、URC、蜂鸣器、HID
+### Configuration, URC, buzzer, and HID
 
 ```ts
 const config = await nfc.getSysConfig();
@@ -248,7 +251,7 @@ await nfc.setKeyboardEnabled(true);
 await nfc.keyboard("HELLO", true);
 ```
 
-### 事件
+### Events
 
 ```ts
 const offLine = nfc.on("line", (line) => {
@@ -263,35 +266,35 @@ offLine();
 offUrc();
 ```
 
-`line` 会收到所有串口响应行，`urc` 会收到没有待处理命令时出现的 `+...` 主动上报行。
+`line` receives every serial response line. `urc` receives unsolicited `+...` lines that arrive when no command is pending.
 
-## React Example
+## React example
 
-本仓库带了一个 React + Vite 示例页面，演示 WebSerial 连接和常见功能读写。
+This repository includes a React + Vite example page for WebSerial connection and common read/write operations.
 
 ```bash
 npm install
 npm run example:dev
 ```
 
-打开 Vite 输出的本地地址，点击 `Connect` 选择串口即可。
+Open the local Vite URL and click `Connect` to choose the serial port.
 
-示例页包含：
+The example page includes:
 
-- 串口连接与波特率选择
-- 模块信息读取
-- 寻卡与卡片字段展示
-- NTAG 读写
-- NDEF 读取与 URL / Wi-Fi / vCard / Text 写入
-- Mifare Classic 认证、读、写
-- ISO15693 读取
-- APDU 发送
-- DIY 输出模板配置
-- 蜂鸣器测试
-- 原始 AT 命令面板
-- 串口日志与 URC 日志
+- Serial connection and baud rate selection
+- Module information reads
+- Card discovery and card field display
+- NTAG reads and writes
+- NDEF reads and URL / Wi-Fi / vCard / Text writes
+- Mifare Classic authentication, reads, and writes
+- ISO15693 reads
+- APDU sending
+- DIY output template configuration
+- Buzzer test
+- Raw AT command panel
+- Serial logs and URC logs
 
-## 本地开发
+## Local development
 
 ```bash
 npm install
@@ -300,39 +303,39 @@ npm run build
 npm run example:build
 ```
 
-目录结构：
+Project structure:
 
 ```text
 src/
-  client.ts       # ATNFC 高阶 API 与命令队列
-  errors.ts       # CME/timeout 错误类型
-  ndef.ts         # NDEF 与 NTAG Type 2 TLV 编解码
-  types.ts        # 公共类型
-  utils.ts        # HEX、FIND、SYSCFG 解析工具
+  client.ts       # High-level ATNFC API and command queue
+  errors.ts       # CME/timeout error types
+  ndef.ts         # NDEF and NTAG Type 2 TLV codecs
+  types.ts        # Public types
+  utils.ts        # HEX, FIND, and SYSCFG parsers
   web-serial.ts   # WebSerial adapter
 example/
-  src/            # React 演示页面
+  src/            # React demo page
 ```
 
-## 发布到 npm
+## Publishing to npm
 
 ```bash
 npm run build
 npm publish --access public
 ```
 
-发布产物由 `package.json` 的 `files` 字段限制为：
+The package contents are limited by the `files` field in `package.json`:
 
 - `dist`
 - `README.md`
 - `AT_COMMAND_REFERENCE.md`
 
-## 注意事项
+## Notes
 
-- `AT+IPR`、`AT+KBDEN`、`AT&W`、`AT&F` 等命令可能让模块保存配置或重启，调用后浏览器串口可能需要重新连接。
-- M1 写块、NTAG 写页、ISO15693 写块都是实写操作，调试时先确认地址和数据长度。
-- WebSerial 需要用户手动授权串口，不能在非用户手势里弹出选择框。
-- 默认命令超时是 3000ms，APDU 或长读操作可以通过 `{ timeoutMs }` 覆盖。
+- Commands such as `AT+IPR`, `AT+KBDEN`, `AT&W`, and `AT&F` may save configuration or reboot the module. The browser serial connection may need to reconnect afterward.
+- M1 block writes, NTAG page writes, and ISO15693 block writes modify real card data. Check the address and data length before testing.
+- WebSerial requires the user to grant serial port access manually. The browser cannot show the port picker outside a user gesture.
+- The default command timeout is 3000 ms. APDU and long read operations can override it with `{ timeoutMs }`.
 
 ## License
 

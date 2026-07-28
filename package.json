@@ -18,7 +18,8 @@
     "typescript",
     "mifare",
     "ntag",
-    "iso15693"
+    "iso15693",
+    "iso14443"
   ],
   "sideEffects": false,
   "files": [
