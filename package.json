@@ -44,6 +44,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "example:dev": "vite --host 127.0.0.1 --port 5173 example",
     "example:build": "vite build example",
+    "example:build:pages": "VITE_BASE_PATH=/atnfc.js/ vite build example",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {},
