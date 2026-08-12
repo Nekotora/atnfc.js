@@ -150,32 +150,90 @@ await nfc.writeNtag(4, "00112233445566778899AABB");
 
 ### NDEF / URL / Wi-Fi / vCard
 
-NDEF 高阶 API 面向 NFC Forum Type 2 Tag，默认从 NTAG 的 page 4 写入 TLV：`03 <len> <NDEF message> FE`。普通手机读 URL、Wi-Fi、名片时，一般就是识别这类 NDEF 数据。
+业务代码不想关心当前卡是 NTAG21x 还是 Mifare Classic 时，直接用通用 NDEF 辅助方法。`target` 不传时，client 会先调用 `findCard(31)`，然后把 NTAG 卡分流到 `AT+NTAGREAD` / `AT+NTAGWRITE`，把 M1 卡分流到认证后的 `AT+M1READ` / `AT+M1WRITE` 块读写。
+
+`findCard()` 返回 `typeName === "mifare-classic"` 的 M1 卡不能使用 `AT+NTAGREAD`。M1 分流会认证数据块、跳过 sector trailer，并解析同样的 NDEF TLV。默认 M1 NDEF key 为 `D3F7D3F7D3F7`，读取时也会尝试 `FFFFFFFFFFFF`。
+
+手机要稳定识别 M1 NDEF，卡上还需要 MIFARE Application Directory（MAD）把扇区标记成 NFC 数据区。第三方应用推荐传 `m1: { mode: "auto" }`：SDK 会先检查 M1 是否已经格式化，只有未格式化时才会先格式化再写入。这个模式可能重写 MAD 块和 sector trailer，所以只应在应用允许管理的卡上使用。
 
 ```ts
 import { encodeTextRecord } from "atnfc.js";
 
-const records = await nfc.readNdefFromNtag(4, 40);
+const records = await nfc.readNdef();
 
-await nfc.writeUrlToNtag("https://example.com", 4);
+await nfc.writeUrl("https://example.com");
 
-await nfc.writeWifiToNtag({
+await nfc.writeWifi({
   ssid: "Studio WiFi",
   authentication: "WPA2",
   encryption: "AES",
   password: "password1234"
 });
 
-await nfc.writeVCardToNtag({
+await nfc.writeVCard({
   name: "ATNFC Demo",
   phone: "+86 138 0000 0000",
   email: "hello@example.com",
   url: "https://example.com"
 });
 
-await nfc.writeNdefToNtag([
+await nfc.writeText("Hello from ATNFC", "en");
+
+await nfc.writeNdef([
   encodeTextRecord("Hello from ATNFC", "en")
 ]);
+```
+
+如果目标是让手机读取 M1 卡：
+
+```ts
+await nfc.writeUrl("https://example.com", {
+  target: "m1",
+  m1: {
+    mode: "auto",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+```
+
+需要强制指定卡型或覆盖存储参数时，也可以传 options：
+
+```ts
+const ntagRecords = await nfc.readNdef({
+  target: "ntag",
+  ntag: { startPage: 4, pages: 40 }
+});
+
+const m1Records = await nfc.readNdef({
+  target: "m1",
+  m1: {
+    startBlock: 4,
+    blocks: 45,
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+
+await nfc.writeUrl("https://example.com", {
+  target: "m1",
+  m1: {
+    startBlock: 4,
+    maxBlocks: 45,
+    mode: "auto",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+
+await nfc.writeUrl("https://example.com", {
+  target: "m1",
+  m1: {
+    mode: "format",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+
+await nfc.formatM1Ndef({
+  keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+});
 ```
 
 也可以直接使用 NDEF 工具函数：

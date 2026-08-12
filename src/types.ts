@@ -98,6 +98,60 @@ export interface SetSysConfigOptions {
 
 export type KeyType = "A" | "B";
 
+export type NdefTarget = "auto" | "ntag" | "m1";
+
+export interface NtagNdefReadOptions {
+  startPage?: number;
+  pages?: number;
+}
+
+export interface NtagNdefWriteOptions {
+  startPage?: number;
+}
+
+export interface MifareClassicNdefReadOptions {
+  startBlock?: number;
+  blocks?: number;
+  keyType?: KeyType;
+  keys?: Array<string | Uint8Array>;
+}
+
+export interface MifareClassicNdefWriteOptions {
+  startBlock?: number;
+  maxBlocks?: number;
+  keyType?: KeyType;
+  key?: string | Uint8Array;
+  keys?: Array<string | Uint8Array>;
+  mode?: "preserve" | "format" | "auto";
+  formatBeforeWrite?: boolean;
+  format?: MifareClassicNdefFormatOptions;
+}
+
+export interface MifareClassicNdefFormatOptions {
+  keyType?: KeyType;
+  keys?: Array<string | Uint8Array>;
+  madKey?: string | Uint8Array;
+  ndefKey?: string | Uint8Array;
+  keyB?: string | Uint8Array;
+  ndefSectors?: number;
+}
+
+export interface NdefReadOptions {
+  target?: NdefTarget;
+  card?: FindCardResult;
+  findFilter?: number;
+  ntag?: NtagNdefReadOptions;
+  m1?: MifareClassicNdefReadOptions;
+}
+
+export interface NdefWriteOptions {
+  target?: NdefTarget;
+  card?: FindCardResult;
+  findFilter?: number;
+  ntag?: NtagNdefWriteOptions;
+  m1?: MifareClassicNdefWriteOptions;
+}
+
 export interface ExchangeOptions {
   crc?: boolean;
   fwi?: number;

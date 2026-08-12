@@ -151,32 +151,90 @@ await nfc.writeNtag(4, "00112233445566778899AABB");
 
 ### NDEF / URL / Wi-Fi / vCard
 
-The high-level NDEF API targets NFC Forum Type 2 Tags. By default, it writes TLV data starting from NTAG page 4: `03 <len> <NDEF message> FE`. Phones usually read URLs, Wi-Fi credentials, and contact cards from this kind of NDEF data.
+Use the generic NDEF helpers when application code should not care whether the card is NTAG21x or Mifare Classic. The client calls `findCard(31)` when `target` is omitted, then routes NTAG cards to `AT+NTAGREAD` / `AT+NTAGWRITE` and M1 cards to authenticated `AT+M1READ` / `AT+M1WRITE` block access.
+
+Mifare Classic cards reported by `findCard()` as `typeName === "mifare-classic"` do not work with `AT+NTAGREAD`. The M1 route authenticates data blocks, skips sector trailer blocks, and parses the same NDEF TLV payload. The default M1 NDEF key is `D3F7D3F7D3F7`, with `FFFFFFFFFFFF` also tried for reads.
+
+For phones to discover M1 NDEF reliably, the card must also have a MIFARE Application Directory (MAD) that marks sectors as NFC data. For third-party applications, prefer `m1: { mode: "auto" }`: the SDK checks whether the M1 card is already formatted and formats it before writing only when needed. This may rewrite MAD blocks and sector trailers, so use it only for cards your app is allowed to manage.
 
 ```ts
 import { encodeTextRecord } from "atnfc.js";
 
-const records = await nfc.readNdefFromNtag(4, 40);
+const records = await nfc.readNdef();
 
-await nfc.writeUrlToNtag("https://example.com", 4);
+await nfc.writeUrl("https://example.com");
 
-await nfc.writeWifiToNtag({
+await nfc.writeWifi({
   ssid: "Studio WiFi",
   authentication: "WPA2",
   encryption: "AES",
   password: "password1234"
 });
 
-await nfc.writeVCardToNtag({
+await nfc.writeVCard({
   name: "ATNFC Demo",
   phone: "+86 138 0000 0000",
   email: "hello@example.com",
   url: "https://example.com"
 });
 
-await nfc.writeNdefToNtag([
+await nfc.writeText("Hello from ATNFC", "en");
+
+await nfc.writeNdef([
   encodeTextRecord("Hello from ATNFC", "en")
 ]);
+```
+
+For M1 cards that should be readable by phones:
+
+```ts
+await nfc.writeUrl("https://example.com", {
+  target: "m1",
+  m1: {
+    mode: "auto",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+```
+
+You can still force a target or override storage parameters:
+
+```ts
+const ntagRecords = await nfc.readNdef({
+  target: "ntag",
+  ntag: { startPage: 4, pages: 40 }
+});
+
+const m1Records = await nfc.readNdef({
+  target: "m1",
+  m1: {
+    startBlock: 4,
+    blocks: 45,
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+
+await nfc.writeUrl("https://example.com", {
+  target: "m1",
+  m1: {
+    startBlock: 4,
+    maxBlocks: 45,
+    mode: "auto",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+
+await nfc.writeUrl("https://example.com", {
+  target: "m1",
+  m1: {
+    mode: "format",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  }
+});
+
+await nfc.formatM1Ndef({
+  keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+});
 ```
 
 You can also use the NDEF utilities directly:

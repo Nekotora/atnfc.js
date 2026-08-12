@@ -2,6 +2,7 @@ import { AtNfcCmeError, AtNfcTimeoutError } from "./errors";
 import {
   decodeType2TagTlv,
   encodeNdefMessage,
+  encodeTextRecord,
   encodeType2TagTlv,
   encodeUriRecord,
   encodeVCardRecord,
@@ -20,6 +21,12 @@ import type {
   InfoResult,
   KeyboardMode,
   KeyType,
+  MifareClassicNdefFormatOptions,
+  MifareClassicNdefReadOptions,
+  MifareClassicNdefWriteOptions,
+  NdefReadOptions,
+  NdefTarget,
+  NdefWriteOptions,
   ProtocolChannel,
   SetSysConfigOptions,
   SysConfig
@@ -34,6 +41,15 @@ import {
   parseFindPayload,
   parseSysConfig
 } from "./utils";
+
+const M1_NDEF_PUBLIC_KEY = "D3F7D3F7D3F7";
+const M1_DEFAULT_KEY = "FFFFFFFFFFFF";
+const M1_MAD_PUBLIC_KEY = "A0A1A2A3A4A5";
+const M1_DEFAULT_NDEF_START_BLOCK = 4;
+const M1_DEFAULT_NDEF_BLOCKS = 45;
+const M1_BLOCK_SIZE = 16;
+const M1_NDEF_TRAILER_ACCESS = "7F078840";
+const M1_MAD_TRAILER_ACCESS = "787788C1";
 
 interface PendingCommand {
   command: string;
@@ -272,16 +288,188 @@ export class AtNfcClient {
     await this.writeNtag(startPage, tlv);
   }
 
+  async readNdefFromM1(options: MifareClassicNdefReadOptions = {}): Promise<DecodedNdefRecord[]> {
+    const startBlock = options.startBlock ?? M1_DEFAULT_NDEF_START_BLOCK;
+    const blocks = options.blocks ?? M1_DEFAULT_NDEF_BLOCKS;
+    const keyType = this.normalizeKeyType(options.keyType ?? "A");
+    const keys = this.normalizeM1NdefReadKeys(options.keys);
+
+    assertIntegerRange("startBlock", startBlock, 0, 255);
+    assertIntegerRange("blocks", blocks, 1, 255);
+
+    let data = "";
+    for (const block of m1DataBlocks(startBlock, blocks)) {
+      data += await this.readM1WithKeys(block, keyType, keys);
+      if (hasCompleteNdefTlv(data)) {
+        return decodeType2TagTlv(data);
+      }
+    }
+
+    return decodeType2TagTlv(data);
+  }
+
+  async writeNdefToM1(records: NdefRecord[], options: MifareClassicNdefWriteOptions = {}): Promise<void> {
+    const startBlock = options.startBlock ?? M1_DEFAULT_NDEF_START_BLOCK;
+    const maxBlocks = options.maxBlocks ?? M1_DEFAULT_NDEF_BLOCKS;
+    const keyType = this.normalizeKeyType(options.keyType ?? "A");
+    const keys = this.normalizeM1NdefWriteKeys(options);
+    const message = encodeNdefMessage(records);
+    const tlv = padToPageBoundary(prefixM1NdefTlv(encodeType2TagTlv(message)), M1_BLOCK_SIZE);
+    const neededBlocks = tlv.length / M1_BLOCK_SIZE;
+
+    assertIntegerRange("startBlock", startBlock, 0, 255);
+    assertIntegerRange("maxBlocks", maxBlocks, 1, 255);
+    if (neededBlocks > maxBlocks) {
+      throw new RangeError(`NDEF message needs ${neededBlocks} M1 block(s), but maxBlocks is ${maxBlocks}`);
+    }
+
+    const mode = options.mode ?? (options.formatBeforeWrite ? "format" : "preserve");
+    if (mode === "format" || (mode === "auto" && !(await this.isM1NdefFormatted({ keyType, keys })))) {
+      await this.formatM1Ndef({
+        keyType,
+        keys,
+        ndefKey: keys[0] ?? M1_NDEF_PUBLIC_KEY,
+        ...options.format
+      });
+    }
+
+    const blocks = m1DataBlocks(startBlock, neededBlocks);
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index]!;
+      const chunk = tlv.slice(index * M1_BLOCK_SIZE, (index + 1) * M1_BLOCK_SIZE);
+      await this.writeM1WithKeys(block, chunk, keyType, keys);
+    }
+  }
+
+  async formatM1Ndef(options: MifareClassicNdefFormatOptions = {}): Promise<void> {
+    const keyType = this.normalizeKeyType(options.keyType ?? "A");
+    const keys = this.normalizeM1NdefFormatKeys(options.keys);
+    const madKey = normalizeHex(options.madKey ?? M1_MAD_PUBLIC_KEY, { bytes: 6 });
+    const ndefKey = normalizeHex(options.ndefKey ?? M1_NDEF_PUBLIC_KEY, { bytes: 6 });
+    const keyB = normalizeHex(options.keyB ?? M1_DEFAULT_KEY, { bytes: 6 });
+    const ndefSectors = options.ndefSectors ?? 15;
+    const emptyFirstBlock = hexToByteArray("00000300FE0000000000000000000000");
+    const emptyBlock = new Uint8Array(M1_BLOCK_SIZE);
+
+    assertIntegerRange("ndefSectors", ndefSectors, 1, 15);
+
+    await this.writeM1WithKeys(1, m1Mad1Block(ndefSectors), keyType, keys);
+    await this.writeM1WithKeys(2, m1Mad2Block(ndefSectors), keyType, keys);
+
+    for (let sector = 1; sector <= ndefSectors; sector += 1) {
+      const firstBlock = sector * 4;
+      for (let offset = 0; offset < 3; offset += 1) {
+        const data = sector === 1 && offset === 0 ? emptyFirstBlock : emptyBlock;
+        await this.writeM1WithKeys(firstBlock + offset, data, keyType, keys);
+      }
+
+      await this.writeM1WithKeys(
+        firstBlock + 3,
+        hexToByteArray(`${ndefKey}${M1_NDEF_TRAILER_ACCESS}${keyB}`),
+        keyType,
+        keys
+      );
+    }
+
+    await this.writeM1WithKeys(3, hexToByteArray(`${madKey}${M1_MAD_TRAILER_ACCESS}${keyB}`), keyType, keys);
+  }
+
+  async isM1NdefFormatted(options: MifareClassicNdefReadOptions = {}): Promise<boolean> {
+    const keyType = this.normalizeKeyType(options.keyType ?? "A");
+    const keys = this.normalizeM1NdefReadKeys(options.keys);
+
+    try {
+      const mad1 = hexToByteArray(await this.readM1WithKeys(1, keyType, keys));
+      const mad2 = hexToByteArray(await this.readM1WithKeys(2, keyType, keys));
+      if (!isM1MadNdef(mad1, mad2)) return false;
+
+      try {
+        const trailer = hexToByteArray(await this.readM1WithKeys(7, keyType, keys));
+        if (!isM1NdefTrailer(trailer)) return false;
+      } catch (error) {
+        if (!(error instanceof AtNfcCmeError && error.code === "E3")) {
+          throw error;
+        }
+      }
+
+      const firstData = hexToByteArray(await this.readM1WithKeys(M1_DEFAULT_NDEF_START_BLOCK, keyType, keys));
+      return hasM1NdefTlvPrefix(firstData);
+    } catch (error) {
+      if (error instanceof AtNfcCmeError && error.code === "E2") {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async readNdef(options: NdefReadOptions = {}): Promise<DecodedNdefRecord[]> {
+    const target = await this.resolveNdefTarget(options.target, options.card, options.findFilter);
+    if (target === "ntag") {
+      return this.readNdefFromNtag(options.ntag?.startPage, options.ntag?.pages);
+    }
+    if (target === "m1") {
+      return this.readNdefFromM1(options.m1);
+    }
+
+    throw new Error(`NDEF is not supported for card type ${target}`);
+  }
+
+  async writeNdef(records: NdefRecord[], options: NdefWriteOptions = {}): Promise<void> {
+    const target = await this.resolveNdefTarget(options.target, options.card, options.findFilter);
+    if (target === "ntag") {
+      await this.writeNdefToNtag(records, options.ntag?.startPage);
+      return;
+    }
+    if (target === "m1") {
+      await this.writeNdefToM1(records, options.m1);
+      return;
+    }
+
+    throw new Error(`NDEF is not supported for card type ${target}`);
+  }
+
+  async writeText(text: string, options?: NdefWriteOptions): Promise<void>;
+  async writeText(text: string, language: string, options?: NdefWriteOptions): Promise<void>;
+  async writeText(text: string, optionsOrLanguage?: NdefWriteOptions | string, options?: NdefWriteOptions): Promise<void> {
+    const language = typeof optionsOrLanguage === "string" ? optionsOrLanguage : undefined;
+    const writeOptions = typeof optionsOrLanguage === "string" ? options : optionsOrLanguage;
+    await this.writeNdef([encodeTextRecord(text, language)], writeOptions);
+  }
+
+  async writeUrl(url: string, options?: NdefWriteOptions): Promise<void> {
+    await this.writeNdef([encodeUriRecord(url)], options);
+  }
+
+  async writeWifi(network: WifiNetwork, options?: NdefWriteOptions): Promise<void> {
+    await this.writeNdef([encodeWifiRecord(network)], options);
+  }
+
+  async writeVCard(contact: VCardContact, options?: NdefWriteOptions): Promise<void> {
+    await this.writeNdef([encodeVCardRecord(contact)], options);
+  }
+
   async writeUrlToNtag(url: string, startPage = 4): Promise<void> {
     await this.writeNdefToNtag([encodeUriRecord(url)], startPage);
+  }
+
+  async writeUrlToM1(url: string, options?: MifareClassicNdefWriteOptions): Promise<void> {
+    await this.writeNdefToM1([encodeUriRecord(url)], options);
   }
 
   async writeWifiToNtag(network: WifiNetwork, startPage = 4): Promise<void> {
     await this.writeNdefToNtag([encodeWifiRecord(network)], startPage);
   }
 
+  async writeWifiToM1(network: WifiNetwork, options?: MifareClassicNdefWriteOptions): Promise<void> {
+    await this.writeNdefToM1([encodeWifiRecord(network)], options);
+  }
+
   async writeVCardToNtag(contact: VCardContact, startPage = 4): Promise<void> {
     await this.writeNdefToNtag([encodeVCardRecord(contact)], startPage);
+  }
+
+  async writeVCardToM1(contact: VCardContact, options?: MifareClassicNdefWriteOptions): Promise<void> {
+    await this.writeNdefToM1([encodeVCardRecord(contact)], options);
   }
 
   async readIso15693(addr: number, blocks = 1): Promise<string> {
@@ -450,6 +638,88 @@ export class AtNfcClient {
     return normalizeHex(value, { bytes: 1 });
   }
 
+  private normalizeKeyType(keyType: KeyType): KeyType {
+    const normalized = keyType.toUpperCase() as KeyType;
+    if (normalized !== "A" && normalized !== "B") {
+      throw new TypeError("keyType must be A or B");
+    }
+
+    return normalized;
+  }
+
+  private normalizeM1NdefReadKeys(keys: Array<string | Uint8Array> | undefined): string[] {
+    const values = keys && keys.length > 0 ? keys : [M1_NDEF_PUBLIC_KEY, M1_DEFAULT_KEY];
+    return values.map((key) => normalizeHex(key, { bytes: 6 }));
+  }
+
+  private normalizeM1NdefWriteKeys(options: MifareClassicNdefWriteOptions): string[] {
+    if (options.keys && options.keys.length > 0) {
+      return options.keys.map((key) => normalizeHex(key, { bytes: 6 }));
+    }
+    if (options.key) {
+      return [normalizeHex(options.key, { bytes: 6 }), M1_DEFAULT_KEY];
+    }
+    return [M1_NDEF_PUBLIC_KEY, M1_DEFAULT_KEY];
+  }
+
+  private normalizeM1NdefFormatKeys(keys: Array<string | Uint8Array> | undefined): string[] {
+    const values = keys && keys.length > 0 ? keys : [M1_DEFAULT_KEY, M1_NDEF_PUBLIC_KEY, M1_MAD_PUBLIC_KEY];
+    return values.map((key) => normalizeHex(key, { bytes: 6 }));
+  }
+
+  private async readM1WithKeys(block: number, keyType: KeyType, keys: string[]): Promise<string> {
+    let authenticationError: unknown;
+
+    for (const key of keys) {
+      try {
+        await this.authenticateM1(block, keyType, key);
+        return this.readM1(block);
+      } catch (error) {
+        if (error instanceof AtNfcCmeError && error.code === "E2") {
+          authenticationError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw authenticationError ?? new Error(`Unable to authenticate M1 block ${block}`);
+  }
+
+  private async writeM1WithKeys(block: number, data: Uint8Array, keyType: KeyType, keys: string[]): Promise<void> {
+    let authenticationError: unknown;
+
+    for (const key of keys) {
+      try {
+        await this.authenticateM1(block, keyType, key);
+        await this.writeM1(block, data);
+        return;
+      } catch (error) {
+        if (error instanceof AtNfcCmeError && error.code === "E2") {
+          authenticationError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw authenticationError ?? new Error(`Unable to authenticate M1 block ${block}`);
+  }
+
+  private async resolveNdefTarget(
+    target: NdefTarget | undefined,
+    card: FindCardResult | undefined,
+    findFilter: number | undefined
+  ): Promise<"ntag" | "m1" | string> {
+    const requested = target ?? "auto";
+    if (requested !== "auto") return requested;
+
+    const found = card ?? await this.findCard(findFilter ?? 31);
+    if (found.typeName === "ntag21x") return "ntag";
+    if (found.typeName === "mifare-classic") return "m1";
+    return found.typeName;
+  }
+
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.catch(() => undefined).then(task);
     this.queue = run.then(
@@ -572,4 +842,140 @@ function pendingPush(pending: PendingCommand, line: string): void {
   if (line !== pending.command) {
     pending.lines.push(line);
   }
+}
+
+function m1DataBlocks(startBlock: number, count: number): number[] {
+  const blocks: number[] = [];
+  let block = startBlock;
+
+  while (blocks.length < count) {
+    if (block > 255) {
+      throw new RangeError("M1 block range must not exceed block 255");
+    }
+    if (!isM1SectorTrailerBlock(block)) {
+      blocks.push(block);
+    }
+    block += 1;
+  }
+
+  return blocks;
+}
+
+function isM1SectorTrailerBlock(block: number): boolean {
+  const sector = block < 128 ? Math.floor(block / 4) : 32 + Math.floor((block - 128) / 16);
+  const firstBlock = sector < 32 ? sector * 4 : 128 + (sector - 32) * 16;
+  const blockCount = sector < 32 ? 4 : 16;
+  return block === firstBlock + blockCount - 1;
+}
+
+function m1Mad1Block(ndefSectors: number): Uint8Array {
+  const bytes = new Uint8Array(M1_BLOCK_SIZE);
+  bytes[1] = 0x01;
+  for (let sector = 1; sector <= Math.min(ndefSectors, 7); sector += 1) {
+    const offset = sector * 2;
+    bytes[offset] = 0x03;
+    bytes[offset + 1] = 0xe1;
+  }
+  bytes[0] = mifareMadCrc8(bytes.slice(1));
+
+  return bytes;
+}
+
+function isM1MadNdef(mad1: Uint8Array, mad2: Uint8Array): boolean {
+  if (mad1.length !== M1_BLOCK_SIZE || mad2.length !== M1_BLOCK_SIZE) return false;
+  if (mad1[0] !== mifareMadCrc8(mad1.slice(1))) return false;
+
+  for (let sector = 1; sector <= 7; sector += 1) {
+    const offset = sector * 2;
+    if (mad1[offset] !== 0x03 || mad1[offset + 1] !== 0xe1) return false;
+  }
+
+  return true;
+}
+
+function m1Mad2Block(ndefSectors: number): Uint8Array {
+  const bytes = new Uint8Array(M1_BLOCK_SIZE);
+  for (let sector = 8; sector <= ndefSectors; sector += 1) {
+    const offset = (sector - 8) * 2;
+    bytes[offset] = 0x03;
+    bytes[offset + 1] = 0xe1;
+  }
+
+  return bytes;
+}
+
+function isM1NdefTrailer(trailer: Uint8Array): boolean {
+  return (
+    trailer.length === M1_BLOCK_SIZE &&
+    bytesToHexLocal(trailer.slice(6, 10)) === M1_NDEF_TRAILER_ACCESS
+  );
+}
+
+function hasM1NdefTlvPrefix(block: Uint8Array): boolean {
+  if (block.length < 5) return false;
+  return block[0] === 0x00 && block[1] === 0x00 && (block[2] === 0x03 || block[2] === 0xfe);
+}
+
+function mifareMadCrc8(data: Uint8Array): number {
+  let crc = 0xc7;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      const msb = crc & 0x80;
+      crc = (crc << 1) & 0xff;
+      if (msb) crc ^= 0x1d;
+    }
+  }
+
+  return crc;
+}
+
+function bytesToHexLocal(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+function prefixM1NdefTlv(tlv: Uint8Array): Uint8Array {
+  const output = new Uint8Array(tlv.length + 2);
+  output.set(tlv, 2);
+  return output;
+}
+
+function hasCompleteNdefTlv(hex: string): boolean {
+  const bytes = hexToByteArray(hex);
+  let offset = 0;
+
+  while (offset < bytes.length) {
+    const type = bytes[offset++];
+    if (type === undefined) return false;
+    if (type === 0x00) continue;
+    if (type === 0xfe) return false;
+
+    const firstLength = bytes[offset++];
+    if (firstLength === undefined) return false;
+
+    let length = firstLength;
+    if (firstLength === 0xff) {
+      const high = bytes[offset++];
+      const low = bytes[offset++];
+      if (high === undefined || low === undefined) return false;
+      length = (high << 8) | low;
+    }
+
+    if (type === 0x03) {
+      return offset + length <= bytes.length;
+    }
+
+    offset += length;
+  }
+
+  return false;
+}
+
+function hexToByteArray(hex: string): Uint8Array {
+  const normalized = normalizeHex(hex);
+  const bytes = new Uint8Array(normalized.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(normalized.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
 }

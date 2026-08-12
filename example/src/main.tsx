@@ -24,7 +24,6 @@ import {
 import {
   AtNfcClient,
   AtNfcCmeError,
-  encodeTextRecord,
   type DecodedNdefRecord,
   type FindCardResult,
   type InfoResult
@@ -73,6 +72,9 @@ function App() {
   const [hidStatus, setHidStatus] = useState("-");
   const [ndefStartPage, setNdefStartPage] = useState(4);
   const [ndefPages, setNdefPages] = useState(40);
+  const [ndefTarget, setNdefTarget] = useState<"auto" | "ntag" | "m1">("auto");
+  const [m1NdefKey, setM1NdefKey] = useState("D3F7D3F7D3F7");
+  const [m1WriteMode, setM1WriteMode] = useState<"preserve" | "auto" | "format">("auto");
   const [ndefRecords, setNdefRecords] = useState<DecodedNdefRecord[]>([]);
   const [urlValue, setUrlValue] = useState("https://example.com");
   const [wifiSsid, setWifiSsid] = useState("Studio WiFi");
@@ -329,23 +331,71 @@ function App() {
         <section className="panel controls extraWide">
           <div className="panelTitle"><Globe size={18} /> NDEF</div>
           <div className="formGrid two">
-            <NumberField label="Page" value={ndefStartPage} onChange={setNdefStartPage} />
-            <NumberField label="Pages" value={ndefPages} onChange={setNdefPages} />
+            <label className="field">
+              <span>Target</span>
+              <select value={ndefTarget} onChange={(event) => setNdefTarget(event.target.value as typeof ndefTarget)}>
+                <option value="auto">Auto</option>
+                <option value="ntag">NTAG</option>
+                <option value="m1">M1</option>
+              </select>
+            </label>
+            <TextField label="M1 Key A" value={m1NdefKey} onChange={setM1NdefKey} />
+            <label className="field">
+              <span>M1 Mode</span>
+              <select value={m1WriteMode} onChange={(event) => setM1WriteMode(event.target.value as typeof m1WriteMode)} disabled={ndefTarget === "ntag"}>
+                <option value="auto">Auto</option>
+                <option value="preserve">Preserve</option>
+                <option value="format">Format</option>
+              </select>
+            </label>
+            <NumberField label={ndefTarget === "m1" ? "Block" : "Page"} value={ndefStartPage} onChange={setNdefStartPage} />
+            <NumberField label={ndefTarget === "m1" ? "Blocks" : "Pages"} value={ndefPages} onChange={setNdefPages} />
           </div>
           <div className="rowActions compact">
             <button
-              onClick={() => run("ndef read", async (active) => setNdefRecords(await active.readNdefFromNtag(ndefStartPage, ndefPages)))}
+              onClick={() => run("ndef read", async (active) => {
+                const records = await active.readNdef({
+                  target: ndefTarget,
+                  ntag: { startPage: ndefStartPage, pages: ndefPages },
+                  m1: { startBlock: ndefStartPage, blocks: ndefPages, keys: [m1NdefKey, "FFFFFFFFFFFF"] }
+                });
+                setNdefRecords(records);
+              })}
               disabled={!client || busy}
-              title="Read NDEF from NTAG"
+              title="Read NDEF"
             >
               <ScanLine size={18} /> Read
             </button>
             <button
-              onClick={() => run("ndef text", (active) => active.writeNdefToNtag([encodeTextRecord(textValue)], ndefStartPage))}
+              onClick={() => run("ndef text", (active) => active.writeText(textValue, {
+                target: ndefTarget,
+                ntag: { startPage: ndefStartPage },
+                m1: {
+                  startBlock: ndefStartPage,
+                  maxBlocks: ndefPages,
+                  keys: [m1NdefKey, "FFFFFFFFFFFF"],
+                  mode: m1WriteMode
+                }
+              }))}
               disabled={!client || busy}
               title="Write text NDEF"
             >
               <Type size={18} /> Text
+            </button>
+            <button
+              onClick={() => {
+                const confirmed = window.confirm("Format M1 as NDEF? This rewrites MAD, data blocks, and sector trailers.");
+                if (confirmed) {
+                  void run("m1 ndef format", (active) => active.formatM1Ndef({
+                    keys: [m1NdefKey, "FFFFFFFFFFFF", "A0A1A2A3A4A5"],
+                    ndefKey: m1NdefKey
+                  }));
+                }
+              }}
+              disabled={!client || busy || ndefTarget === "ntag"}
+              title="Format M1 as NDEF"
+            >
+              <Save size={18} /> Format
             </button>
           </div>
           <TextField label="Text" value={textValue} onChange={setTextValue} />
@@ -367,7 +417,20 @@ function App() {
           <div className="panelTitle"><Globe size={18} /> URL</div>
           <TextField label="URL" value={urlValue} onChange={setUrlValue} />
           <div className="rowActions">
-            <button onClick={() => run("ndef url", (active) => active.writeUrlToNtag(urlValue, ndefStartPage))} disabled={!client || busy} title="Write URL NDEF">
+            <button
+              onClick={() => run("ndef url", (active) => active.writeUrl(urlValue, {
+                target: ndefTarget,
+                ntag: { startPage: ndefStartPage },
+                m1: {
+                  startBlock: ndefStartPage,
+                  maxBlocks: ndefPages,
+                  keys: [m1NdefKey, "FFFFFFFFFFFF"],
+                  mode: m1WriteMode
+                }
+              }))}
+              disabled={!client || busy}
+              title="Write URL NDEF"
+            >
               <Save size={18} /> Write
             </button>
           </div>
@@ -389,7 +452,19 @@ function App() {
           <TextField label="Password" value={wifiPassword} onChange={setWifiPassword} />
           <div className="rowActions">
             <button
-              onClick={() => run("ndef wifi", (active) => active.writeWifiToNtag({ ssid: wifiSsid, authentication: wifiAuth, password: wifiAuth === "OPEN" ? undefined : wifiPassword }, ndefStartPage))}
+              onClick={() => run("ndef wifi", (active) => active.writeWifi(
+                { ssid: wifiSsid, authentication: wifiAuth, password: wifiAuth === "OPEN" ? undefined : wifiPassword },
+                {
+                  target: ndefTarget,
+                  ntag: { startPage: ndefStartPage },
+                  m1: {
+                    startBlock: ndefStartPage,
+                    maxBlocks: ndefPages,
+                    keys: [m1NdefKey, "FFFFFFFFFFFF"],
+                    mode: m1WriteMode
+                  }
+                }
+              ))}
               disabled={!client || busy}
               title="Write Wi-Fi NDEF"
             >
@@ -406,7 +481,19 @@ function App() {
           <TextField label="URL" value={contactUrl} onChange={setContactUrl} />
           <div className="rowActions">
             <button
-              onClick={() => run("ndef vcard", (active) => active.writeVCardToNtag({ name: contactName, phone: contactPhone, email: contactEmail, url: contactUrl }, ndefStartPage))}
+              onClick={() => run("ndef vcard", (active) => active.writeVCard(
+                { name: contactName, phone: contactPhone, email: contactEmail, url: contactUrl },
+                {
+                  target: ndefTarget,
+                  ntag: { startPage: ndefStartPage },
+                  m1: {
+                    startBlock: ndefStartPage,
+                    maxBlocks: ndefPages,
+                    keys: [m1NdefKey, "FFFFFFFFFFFF"],
+                    mode: m1WriteMode
+                  }
+                }
+              ))}
               disabled={!client || busy}
               title="Write vCard NDEF"
             >
