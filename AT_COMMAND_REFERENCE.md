@@ -501,7 +501,7 @@ Mifare Classic（`+FIND` 的 `type=01`）和 NTAG21x（`type=02`）虽然都可�
 - M1 使用 `AT+M1AUTH` / `AT+M1READ` / `AT+M1WRITE`，每块 16 字节，读写前需要密钥认证。
 - NTAG21x 使用 `AT+NTAGREAD` / `AT+NTAGWRITE`，每页 4 字节，不使用 M1 块认证流程。
 - `AT+NTAGREAD` 不适用于 `type=01` 的 M1 卡。对 M1 卡执行 NTAG 命令时，固件可能返回 `+CME ERROR:E0`（卡类型错误）或 `+CME ERROR:E1`（未寻到卡/当前命令未能在目标类型上寻到可操作标签）。
-- 如果要在 M1 上读写 NDEF，应按 Mifare Classic NDEF 的数据块布局处理：认证对应块，跳过 sector trailer，再从数据块中解析或写入 NDEF TLV。常见 NDEF 公共 Key A 为 `D3F7D3F7D3F7`，空白卡/测试卡也可能仍是 `FFFFFFFFFFFF`。
+- 如果要在 M1 上读写 NDEF，应按 Mifare Classic NDEF 的数据块布局处理：认证对应块，跳过 sector trailer，再从数据块中解析或写入 NDEF TLV。常见 NDEF 数据区公共 Key A 为 `D3F7D3F7D3F7`，MAD 目录扇区公共 Key A 为 `A0A1A2A3A4A5`，空白卡/测试卡也可能仍是 `FFFFFFFFFFFF`。
 - 注意：让手机把 M1 当作 NDEF 标签，通常还要求卡已经按 Mifare Classic NDEF/MAD 规则初始化；只把 NDEF TLV 写进普通数据块，不一定会被手机识别。
 
 ### AT+NTAGREAD

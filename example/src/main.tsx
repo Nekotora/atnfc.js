@@ -41,6 +41,9 @@ interface LogEntry {
 }
 
 const DEFAULT_BAUD_RATE = 115200;
+const M1_NDEF_PUBLIC_KEY = "D3F7D3F7D3F7";
+const M1_MAD_PUBLIC_KEY = "A0A1A2A3A4A5";
+const M1_DEFAULT_KEY = "FFFFFFFFFFFF";
 
 function App() {
   const [client, setClient] = useState<AtNfcClient | null>(null);
@@ -73,7 +76,7 @@ function App() {
   const [ndefStartPage, setNdefStartPage] = useState(4);
   const [ndefPages, setNdefPages] = useState(40);
   const [ndefTarget, setNdefTarget] = useState<"auto" | "ntag" | "m1">("auto");
-  const [m1NdefKey, setM1NdefKey] = useState("D3F7D3F7D3F7");
+  const [m1NdefKey, setM1NdefKey] = useState(M1_NDEF_PUBLIC_KEY);
   const [m1WriteMode, setM1WriteMode] = useState<"preserve" | "auto" | "format">("auto");
   const [ndefRecords, setNdefRecords] = useState<DecodedNdefRecord[]>([]);
   const [urlValue, setUrlValue] = useState("https://example.com");
@@ -87,6 +90,11 @@ function App() {
   const [textValue, setTextValue] = useState("Hello from ATNFC");
   const uidLoopBusyRef = useRef(false);
   const lastLoopUidRef = useRef<string | null>(null);
+
+  const m1NdefKeys = useMemo(() => {
+    const normalized = m1NdefKey.trim().toUpperCase();
+    return normalized === M1_NDEF_PUBLIC_KEY ? undefined : [normalized, M1_DEFAULT_KEY, M1_MAD_PUBLIC_KEY];
+  }, [m1NdefKey]);
 
   const supported = WebSerialTransport.isSupported();
   const statusLabel = useMemo(() => {
@@ -357,7 +365,7 @@ function App() {
                 const records = await active.readNdef({
                   target: ndefTarget,
                   ntag: { startPage: ndefStartPage, pages: ndefPages },
-                  m1: { startBlock: ndefStartPage, blocks: ndefPages, keys: [m1NdefKey, "FFFFFFFFFFFF"] }
+                  m1: { startBlock: ndefStartPage, blocks: ndefPages, ...(m1NdefKeys ? { keys: m1NdefKeys } : {}) }
                 });
                 setNdefRecords(records);
               })}
@@ -373,8 +381,8 @@ function App() {
                 m1: {
                   startBlock: ndefStartPage,
                   maxBlocks: ndefPages,
-                  keys: [m1NdefKey, "FFFFFFFFFFFF"],
-                  mode: m1WriteMode
+                  mode: m1WriteMode,
+                  ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
                 }
               }))}
               disabled={!client || busy}
@@ -387,8 +395,8 @@ function App() {
                 const confirmed = window.confirm("Format M1 as NDEF? This rewrites MAD, data blocks, and sector trailers.");
                 if (confirmed) {
                   void run("m1 ndef format", (active) => active.formatM1Ndef({
-                    keys: [m1NdefKey, "FFFFFFFFFFFF", "A0A1A2A3A4A5"],
-                    ndefKey: m1NdefKey
+                    ndefKey: m1NdefKey,
+                    ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
                   }));
                 }
               }}
@@ -424,8 +432,8 @@ function App() {
                 m1: {
                   startBlock: ndefStartPage,
                   maxBlocks: ndefPages,
-                  keys: [m1NdefKey, "FFFFFFFFFFFF"],
-                  mode: m1WriteMode
+                  mode: m1WriteMode,
+                  ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
                 }
               }))}
               disabled={!client || busy}
@@ -460,8 +468,8 @@ function App() {
                   m1: {
                     startBlock: ndefStartPage,
                     maxBlocks: ndefPages,
-                    keys: [m1NdefKey, "FFFFFFFFFFFF"],
-                    mode: m1WriteMode
+                    mode: m1WriteMode,
+                    ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
                   }
                 }
               ))}
@@ -489,8 +497,8 @@ function App() {
                   m1: {
                     startBlock: ndefStartPage,
                     maxBlocks: ndefPages,
-                    keys: [m1NdefKey, "FFFFFFFFFFFF"],
-                    mode: m1WriteMode
+                    mode: m1WriteMode,
+                    ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
                   }
                 }
               ))}

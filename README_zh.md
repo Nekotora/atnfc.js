@@ -152,7 +152,7 @@ await nfc.writeNtag(4, "00112233445566778899AABB");
 
 业务代码不想关心当前卡是 NTAG21x 还是 Mifare Classic 时，直接用通用 NDEF 辅助方法。`target` 不传时，client 会先调用 `findCard(31)`，然后把 NTAG 卡分流到 `AT+NTAGREAD` / `AT+NTAGWRITE`，把 M1 卡分流到认证后的 `AT+M1READ` / `AT+M1WRITE` 块读写。
 
-`findCard()` 返回 `typeName === "mifare-classic"` 的 M1 卡不能使用 `AT+NTAGREAD`。M1 分流会认证数据块、跳过 sector trailer，并解析同样的 NDEF TLV。默认 M1 NDEF key 为 `D3F7D3F7D3F7`，读取时也会尝试 `FFFFFFFFFFFF`。
+`findCard()` 返回 `typeName === "mifare-classic"` 的 M1 卡不能使用 `AT+NTAGREAD`。M1 分流会认证数据块、跳过 sector trailer，并解析同样的 NDEF TLV。默认 M1 NDEF 数据区 key 为 `D3F7D3F7D3F7`；空白/测试卡也会尝试 `FFFFFFFFFFFF`，格式化状态检查会额外尝试公开 MAD key `A0A1A2A3A4A5`。
 
 手机要稳定识别 M1 NDEF，卡上还需要 MIFARE Application Directory（MAD）把扇区标记成 NFC 数据区。第三方应用推荐传 `m1: { mode: "auto" }`：SDK 会先检查 M1 是否已经格式化，只有未格式化时才会先格式化再写入。这个模式可能重写 MAD 块和 sector trailer，所以只应在应用允许管理的卡上使用。
 
@@ -190,8 +190,7 @@ await nfc.writeNdef([
 await nfc.writeUrl("https://example.com", {
   target: "m1",
   m1: {
-    mode: "auto",
-    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+    mode: "auto"
   }
 });
 ```
@@ -208,8 +207,7 @@ const m1Records = await nfc.readNdef({
   target: "m1",
   m1: {
     startBlock: 4,
-    blocks: 45,
-    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+    blocks: 45
   }
 });
 
@@ -218,21 +216,21 @@ await nfc.writeUrl("https://example.com", {
   m1: {
     startBlock: 4,
     maxBlocks: 45,
-    mode: "auto",
-    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+    mode: "auto"
   }
 });
 
+// 只有卡使用自定义 key 时才需要传 keys。
 await nfc.writeUrl("https://example.com", {
   target: "m1",
   m1: {
-    mode: "format",
-    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+    mode: "auto",
+    keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF", "A0A1A2A3A4A5"]
   }
 });
 
 await nfc.formatM1Ndef({
-  keys: ["D3F7D3F7D3F7", "FFFFFFFFFFFF"]
+  ndefKey: "D3F7D3F7D3F7"
 });
 ```
 

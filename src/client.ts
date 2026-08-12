@@ -47,6 +47,7 @@ const M1_DEFAULT_KEY = "FFFFFFFFFFFF";
 const M1_MAD_PUBLIC_KEY = "A0A1A2A3A4A5";
 const M1_DEFAULT_NDEF_START_BLOCK = 4;
 const M1_DEFAULT_NDEF_BLOCKS = 45;
+const M1_DEFAULT_NDEF_TLV_OFFSET = 0;
 const M1_BLOCK_SIZE = 16;
 const M1_NDEF_TRAILER_ACCESS = "7F078840";
 const M1_MAD_TRAILER_ACCESS = "787788C1";
@@ -57,6 +58,11 @@ interface PendingCommand {
   resolve: (response: AtCommandResponse) => void;
   reject: (reason: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface M1NdefFormatInfo {
+  formatted: boolean;
+  tlvOffset?: number;
 }
 
 export class AtNfcClient {
@@ -314,23 +320,38 @@ export class AtNfcClient {
     const keyType = this.normalizeKeyType(options.keyType ?? "A");
     const keys = this.normalizeM1NdefWriteKeys(options);
     const message = encodeNdefMessage(records);
-    const tlv = padToPageBoundary(prefixM1NdefTlv(encodeType2TagTlv(message)), M1_BLOCK_SIZE);
-    const neededBlocks = tlv.length / M1_BLOCK_SIZE;
+    const encodedTlv = encodeType2TagTlv(message);
 
     assertIntegerRange("startBlock", startBlock, 0, 255);
     assertIntegerRange("maxBlocks", maxBlocks, 1, 255);
-    if (neededBlocks > maxBlocks) {
-      throw new RangeError(`NDEF message needs ${neededBlocks} M1 block(s), but maxBlocks is ${maxBlocks}`);
-    }
 
     const mode = options.mode ?? (options.formatBeforeWrite ? "format" : "preserve");
-    if (mode === "format" || (mode === "auto" && !(await this.isM1NdefFormatted({ keyType, keys })))) {
+    let tlvOffset = M1_DEFAULT_NDEF_TLV_OFFSET;
+    if (mode === "auto") {
+      const formatInfo = await this.getM1NdefFormatInfo({ keyType, keys });
+      if (formatInfo.formatted) {
+        tlvOffset = formatInfo.tlvOffset ?? M1_DEFAULT_NDEF_TLV_OFFSET;
+      } else {
+        await this.formatM1Ndef({
+          keyType,
+          keys,
+          ndefKey: keys[0] ?? M1_NDEF_PUBLIC_KEY,
+          ...options.format
+        });
+      }
+    } else if (mode === "format") {
       await this.formatM1Ndef({
         keyType,
         keys,
         ndefKey: keys[0] ?? M1_NDEF_PUBLIC_KEY,
         ...options.format
       });
+    }
+
+    const tlv = padToPageBoundary(prefixM1NdefTlv(encodedTlv, tlvOffset), M1_BLOCK_SIZE);
+    const neededBlocks = tlv.length / M1_BLOCK_SIZE;
+    if (neededBlocks > maxBlocks) {
+      throw new RangeError(`NDEF message needs ${neededBlocks} M1 block(s), but maxBlocks is ${maxBlocks}`);
     }
 
     const blocks = m1DataBlocks(startBlock, neededBlocks);
@@ -348,7 +369,7 @@ export class AtNfcClient {
     const ndefKey = normalizeHex(options.ndefKey ?? M1_NDEF_PUBLIC_KEY, { bytes: 6 });
     const keyB = normalizeHex(options.keyB ?? M1_DEFAULT_KEY, { bytes: 6 });
     const ndefSectors = options.ndefSectors ?? 15;
-    const emptyFirstBlock = hexToByteArray("00000300FE0000000000000000000000");
+    const emptyFirstBlock = padToPageBoundary(encodeType2TagTlv(new Uint8Array()), M1_BLOCK_SIZE);
     const emptyBlock = new Uint8Array(M1_BLOCK_SIZE);
 
     assertIntegerRange("ndefSectors", ndefSectors, 1, 15);
@@ -375,28 +396,34 @@ export class AtNfcClient {
   }
 
   async isM1NdefFormatted(options: MifareClassicNdefReadOptions = {}): Promise<boolean> {
+    return (await this.getM1NdefFormatInfo(options)).formatted;
+  }
+
+  private async getM1NdefFormatInfo(options: MifareClassicNdefReadOptions = {}): Promise<M1NdefFormatInfo> {
     const keyType = this.normalizeKeyType(options.keyType ?? "A");
     const keys = this.normalizeM1NdefReadKeys(options.keys);
+    const madKeys = this.normalizeM1MadKeys(keys);
 
     try {
-      const mad1 = hexToByteArray(await this.readM1WithKeys(1, keyType, keys));
-      const mad2 = hexToByteArray(await this.readM1WithKeys(2, keyType, keys));
-      if (!isM1MadNdef(mad1, mad2)) return false;
+      const mad1 = hexToByteArray(await this.readM1WithKeys(1, keyType, madKeys));
+      const mad2 = hexToByteArray(await this.readM1WithKeys(2, keyType, madKeys));
+      if (!isM1MadNdef(mad1, mad2)) return { formatted: false };
 
       try {
         const trailer = hexToByteArray(await this.readM1WithKeys(7, keyType, keys));
-        if (!isM1NdefTrailer(trailer)) return false;
+        if (!isM1NdefTrailer(trailer)) return { formatted: false };
       } catch (error) {
-        if (!(error instanceof AtNfcCmeError && error.code === "E3")) {
+        if (!(error instanceof AtNfcCmeError && (error.code === "E2" || error.code === "E3"))) {
           throw error;
         }
       }
 
       const firstData = hexToByteArray(await this.readM1WithKeys(M1_DEFAULT_NDEF_START_BLOCK, keyType, keys));
-      return hasM1NdefTlvPrefix(firstData);
+      const tlvOffset = getM1NdefTlvOffset(firstData);
+      return tlvOffset === undefined ? { formatted: false } : { formatted: true, tlvOffset };
     } catch (error) {
       if (error instanceof AtNfcCmeError && error.code === "E2") {
-        return false;
+        return { formatted: false };
       }
       throw error;
     }
@@ -664,7 +691,25 @@ export class AtNfcClient {
 
   private normalizeM1NdefFormatKeys(keys: Array<string | Uint8Array> | undefined): string[] {
     const values = keys && keys.length > 0 ? keys : [M1_DEFAULT_KEY, M1_NDEF_PUBLIC_KEY, M1_MAD_PUBLIC_KEY];
-    return values.map((key) => normalizeHex(key, { bytes: 6 }));
+    return this.uniqueM1Keys([...values, M1_MAD_PUBLIC_KEY]);
+  }
+
+  private normalizeM1MadKeys(keys: string[]): string[] {
+    return this.uniqueM1Keys([M1_MAD_PUBLIC_KEY, ...keys]);
+  }
+
+  private uniqueM1Keys(keys: Array<string | Uint8Array>): string[] {
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const key of keys) {
+      const normalized = normalizeHex(key, { bytes: 6 });
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        unique.push(normalized);
+      }
+    }
+
+    return unique;
   }
 
   private async readM1WithKeys(block: number, keyType: KeyType, keys: string[]): Promise<string> {
@@ -876,21 +921,16 @@ function m1Mad1Block(ndefSectors: number): Uint8Array {
     bytes[offset] = 0x03;
     bytes[offset + 1] = 0xe1;
   }
-  bytes[0] = mifareMadCrc8(bytes.slice(1));
+  bytes[0] = mifareMadCrc8(m1MadCrcInput(bytes, m1Mad2Block(ndefSectors)));
 
   return bytes;
 }
 
 function isM1MadNdef(mad1: Uint8Array, mad2: Uint8Array): boolean {
   if (mad1.length !== M1_BLOCK_SIZE || mad2.length !== M1_BLOCK_SIZE) return false;
-  if (mad1[0] !== mifareMadCrc8(mad1.slice(1))) return false;
+  if (mad1[0] !== mifareMadCrc8(m1MadCrcInput(mad1, mad2))) return false;
 
-  for (let sector = 1; sector <= 7; sector += 1) {
-    const offset = sector * 2;
-    if (mad1[offset] !== 0x03 || mad1[offset + 1] !== 0xe1) return false;
-  }
-
-  return true;
+  return mad1[2] === 0x03 && mad1[3] === 0xe1;
 }
 
 function m1Mad2Block(ndefSectors: number): Uint8Array {
@@ -904,6 +944,13 @@ function m1Mad2Block(ndefSectors: number): Uint8Array {
   return bytes;
 }
 
+function m1MadCrcInput(mad1: Uint8Array, mad2: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(31);
+  bytes.set(mad1.slice(1), 0);
+  bytes.set(mad2, 15);
+  return bytes;
+}
+
 function isM1NdefTrailer(trailer: Uint8Array): boolean {
   return (
     trailer.length === M1_BLOCK_SIZE &&
@@ -911,9 +958,9 @@ function isM1NdefTrailer(trailer: Uint8Array): boolean {
   );
 }
 
-function hasM1NdefTlvPrefix(block: Uint8Array): boolean {
-  if (block.length < 5) return false;
-  return block[0] === 0x00 && block[1] === 0x00 && (block[2] === 0x03 || block[2] === 0xfe);
+function getM1NdefTlvOffset(block: Uint8Array): number | undefined {
+  const offset = block.findIndex((byte) => byte === 0x03 || byte === 0xfe);
+  return offset === -1 ? undefined : offset;
 }
 
 function mifareMadCrc8(data: Uint8Array): number {
@@ -934,9 +981,9 @@ function bytesToHexLocal(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
-function prefixM1NdefTlv(tlv: Uint8Array): Uint8Array {
-  const output = new Uint8Array(tlv.length + 2);
-  output.set(tlv, 2);
+function prefixM1NdefTlv(tlv: Uint8Array, offset: number): Uint8Array {
+  const output = new Uint8Array(tlv.length + offset);
+  output.set(tlv, offset);
   return output;
 }
 
