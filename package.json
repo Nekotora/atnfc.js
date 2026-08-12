@@ -1,6 +1,6 @@
 {
   "name": "atnfc.js",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript client for ATNFC serial NFC modules.",
   "type": "module",
   "license": "MIT",
