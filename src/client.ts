@@ -24,6 +24,8 @@ import type {
   MifareClassicNdefFormatOptions,
   MifareClassicNdefReadOptions,
   MifareClassicNdefWriteOptions,
+  Iso15693NdefReadOptions,
+  Iso15693NdefWriteOptions,
   NdefReadOptions,
   NdefTarget,
   NdefWriteOptions,
@@ -51,6 +53,14 @@ const M1_DEFAULT_NDEF_TLV_OFFSET = 0;
 const M1_BLOCK_SIZE = 16;
 const M1_NDEF_TRAILER_ACCESS = "7F078840";
 const M1_MAD_TRAILER_ACCESS = "787788C1";
+const ISO15693_DEFAULT_NDEF_START_BLOCK = 0;
+const ISO15693_DEFAULT_NDEF_BLOCK_SIZE = 4;
+const ISO15693_DEFAULT_NDEF_BLOCKS = 64;
+const ISO15693_MAX_READ_BLOCKS = 30;
+const ISO15693_NDEF_CC_MAGIC = 0xe1;
+const ISO15693_NDEF_EXTENDED_CC_MAGIC = 0xe2;
+const ISO15693_NDEF_CC_VERSION_ACCESS = 0x40;
+const ISO15693_NDEF_CC_FEATURE_FLAGS = 0x00;
 
 interface PendingCommand {
   command: string;
@@ -64,6 +74,10 @@ interface M1NdefFormatInfo {
   formatted: boolean;
   tlvOffset?: number;
 }
+
+type Iso15693NdefFormatInfo =
+  | { formatted: false }
+  | { formatted: true; cc: Uint8Array; ccLength: number; t5tAreaBytes: number };
 
 export class AtNfcClient {
   readonly transport: AtNfcTransport;
@@ -314,6 +328,32 @@ export class AtNfcClient {
     return decodeType2TagTlv(data);
   }
 
+  async readNdefFromIso15693(options: Iso15693NdefReadOptions = {}): Promise<DecodedNdefRecord[]> {
+    const startBlock = options.startBlock ?? ISO15693_DEFAULT_NDEF_START_BLOCK;
+    const blockSize = options.blockSize ?? ISO15693_DEFAULT_NDEF_BLOCK_SIZE;
+    const maxBlocks = options.blocks ?? ISO15693_DEFAULT_NDEF_BLOCKS;
+
+    this.assertIso15693BlockWindow(startBlock, maxBlocks, "blocks");
+    assertIntegerRange("blockSize", blockSize, 1, 256);
+
+    const initialBlocks = Math.min(maxBlocks, Math.max(1, Math.ceil(8 / blockSize)));
+    let data = await this.readIso15693Bytes(startBlock, initialBlocks);
+    const formatInfo = parseIso15693NdefCc(data);
+    if (!formatInfo.formatted) {
+      throw new Error("ISO15693 card is not formatted as an NFC Forum Type 5 NDEF tag");
+    }
+
+    let blocksRead = initialBlocks;
+    const totalBlocks = Math.min(maxBlocks, Math.ceil((formatInfo.ccLength + formatInfo.t5tAreaBytes) / blockSize));
+    while (blocksRead < totalBlocks && !hasCompleteNdefTlv(bytesToHexLocal(data.slice(formatInfo.ccLength)))) {
+      const blocks = Math.min(ISO15693_MAX_READ_BLOCKS, totalBlocks - blocksRead);
+      data = concatBytesLocal([data, await this.readIso15693Bytes(startBlock + blocksRead, blocks)]);
+      blocksRead += blocks;
+    }
+
+    return decodeType2TagTlv(data.slice(formatInfo.ccLength));
+  }
+
   async writeNdefToM1(records: NdefRecord[], options: MifareClassicNdefWriteOptions = {}): Promise<void> {
     const startBlock = options.startBlock ?? M1_DEFAULT_NDEF_START_BLOCK;
     const maxBlocks = options.maxBlocks ?? M1_DEFAULT_NDEF_BLOCKS;
@@ -359,6 +399,62 @@ export class AtNfcClient {
       const block = blocks[index]!;
       const chunk = tlv.slice(index * M1_BLOCK_SIZE, (index + 1) * M1_BLOCK_SIZE);
       await this.writeM1WithKeys(block, chunk, keyType, keys);
+    }
+  }
+
+  async writeNdefToIso15693(records: NdefRecord[], options: Iso15693NdefWriteOptions = {}): Promise<void> {
+    const startBlock = options.startBlock ?? ISO15693_DEFAULT_NDEF_START_BLOCK;
+    const blockSize = options.blockSize ?? ISO15693_DEFAULT_NDEF_BLOCK_SIZE;
+    const maxBlocks = options.maxBlocks ?? ISO15693_DEFAULT_NDEF_BLOCKS;
+    const mode = options.mode ?? "preserve";
+    const featureFlags = options.featureFlags ?? ISO15693_NDEF_CC_FEATURE_FLAGS;
+
+    this.assertIso15693BlockWindow(startBlock, maxBlocks, "maxBlocks");
+    assertIntegerRange("blockSize", blockSize, 1, 256);
+    assertIntegerRange("featureFlags", featureFlags, 0, 255);
+    if (mode !== "preserve" && mode !== "format" && mode !== "auto") {
+      throw new TypeError("mode must be preserve, format, or auto");
+    }
+
+    const message = encodeNdefMessage(records);
+    const tlv = encodeType2TagTlv(message);
+    let cc: Uint8Array | undefined;
+    let t5tAreaBytes = iso15693T5tAreaBytes(maxBlocks, blockSize, 4);
+
+    if (mode !== "format") {
+      const initialBlocks = Math.min(maxBlocks, Math.max(1, Math.ceil(8 / blockSize)));
+      const existing = await this.readIso15693Bytes(startBlock, initialBlocks);
+      const formatInfo = parseIso15693NdefCc(existing);
+      if (formatInfo.formatted) {
+        cc = formatInfo.cc;
+        t5tAreaBytes = formatInfo.t5tAreaBytes;
+      } else if (mode === "preserve") {
+        throw new Error("ISO15693 card is not formatted as an NFC Forum Type 5 NDEF tag; pass iso15693: { mode: \"format\" } to write a Type 5 capability container");
+      }
+    }
+
+    if (!cc) {
+      cc = options.cc ? normalizeIso15693NdefCc(options.cc) : iso15693NdefCc(t5tAreaBytes, featureFlags);
+      const formatInfo = parseIso15693NdefCc(cc);
+      if (!formatInfo.formatted) {
+        throw new Error("ISO15693 Type 5 capability container is invalid");
+      }
+      t5tAreaBytes = formatInfo.t5tAreaBytes;
+    }
+
+    const data = padToPageBoundary(concatBytesLocal([cc, tlv]), blockSize);
+    const neededBlocks = data.length / blockSize;
+    if (tlv.length > t5tAreaBytes) {
+      throw new RangeError(`NDEF TLV needs ${tlv.length} byte(s), but ISO15693 Type 5 area is ${t5tAreaBytes} byte(s)`);
+    }
+    if (neededBlocks > maxBlocks) {
+      throw new RangeError(`NDEF message needs ${neededBlocks} ISO15693 block(s), but maxBlocks is ${maxBlocks}`);
+    }
+
+    for (let index = 0; index < neededBlocks; index += 1) {
+      const block = startBlock + index;
+      const chunk = data.slice(index * blockSize, (index + 1) * blockSize);
+      await this.writeIso15693(block, chunk);
     }
   }
 
@@ -437,6 +533,9 @@ export class AtNfcClient {
     if (target === "m1") {
       return this.readNdefFromM1(options.m1);
     }
+    if (target === "iso15693") {
+      return this.readNdefFromIso15693(options.iso15693);
+    }
 
     throw new Error(`NDEF is not supported for card type ${target}`);
   }
@@ -449,6 +548,10 @@ export class AtNfcClient {
     }
     if (target === "m1") {
       await this.writeNdefToM1(records, options.m1);
+      return;
+    }
+    if (target === "iso15693") {
+      await this.writeNdefToIso15693(records, options.iso15693);
       return;
     }
 
@@ -483,6 +586,10 @@ export class AtNfcClient {
     await this.writeNdefToM1([encodeUriRecord(url)], options);
   }
 
+  async writeUrlToIso15693(url: string, options?: Iso15693NdefWriteOptions): Promise<void> {
+    await this.writeNdefToIso15693([encodeUriRecord(url)], options);
+  }
+
   async writeWifiToNtag(network: WifiNetwork, startPage = 4): Promise<void> {
     await this.writeNdefToNtag([encodeWifiRecord(network)], startPage);
   }
@@ -491,12 +598,20 @@ export class AtNfcClient {
     await this.writeNdefToM1([encodeWifiRecord(network)], options);
   }
 
+  async writeWifiToIso15693(network: WifiNetwork, options?: Iso15693NdefWriteOptions): Promise<void> {
+    await this.writeNdefToIso15693([encodeWifiRecord(network)], options);
+  }
+
   async writeVCardToNtag(contact: VCardContact, startPage = 4): Promise<void> {
     await this.writeNdefToNtag([encodeVCardRecord(contact)], startPage);
   }
 
   async writeVCardToM1(contact: VCardContact, options?: MifareClassicNdefWriteOptions): Promise<void> {
     await this.writeNdefToM1([encodeVCardRecord(contact)], options);
+  }
+
+  async writeVCardToIso15693(contact: VCardContact, options?: Iso15693NdefWriteOptions): Promise<void> {
+    await this.writeNdefToIso15693([encodeVCardRecord(contact)], options);
   }
 
   async readIso15693(addr: number, blocks = 1): Promise<string> {
@@ -751,6 +866,30 @@ export class AtNfcClient {
     throw authenticationError ?? new Error(`Unable to authenticate M1 block ${block}`);
   }
 
+  private async readIso15693Bytes(startBlock: number, blocks: number): Promise<Uint8Array> {
+    this.assertIso15693BlockWindow(startBlock, blocks, "blocks");
+    const data: Uint8Array[] = [];
+    let currentBlock = startBlock;
+    let remaining = blocks;
+
+    while (remaining > 0) {
+      const currentBlocks = Math.min(ISO15693_MAX_READ_BLOCKS, remaining);
+      data.push(hexToByteArray(await this.readIso15693(currentBlock, currentBlocks)));
+      currentBlock += currentBlocks;
+      remaining -= currentBlocks;
+    }
+
+    return concatBytesLocal(data);
+  }
+
+  private assertIso15693BlockWindow(startBlock: number, blocks: number, blocksName: string): void {
+    assertIntegerRange("startBlock", startBlock, 0, 255);
+    assertIntegerRange(blocksName, blocks, 1, 256);
+    if (startBlock + blocks > 256) {
+      throw new RangeError(`ISO15693 block range must not exceed block 255`);
+    }
+  }
+
   private async resolveNdefTarget(
     target: NdefTarget | undefined,
     card: FindCardResult | undefined,
@@ -762,6 +901,7 @@ export class AtNfcClient {
     const found = card ?? await this.findCard(findFilter ?? 31);
     if (found.typeName === "ntag21x") return "ntag";
     if (found.typeName === "mifare-classic") return "m1";
+    if (found.typeName === "iso15693") return "iso15693";
     return found.typeName;
   }
 
@@ -981,10 +1121,103 @@ function bytesToHexLocal(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
+function concatBytesLocal(parts: Uint8Array[]): Uint8Array {
+  const length = parts.reduce((total, part) => total + part.length, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+
+  return output;
+}
+
 function prefixM1NdefTlv(tlv: Uint8Array, offset: number): Uint8Array {
   const output = new Uint8Array(tlv.length + offset);
   output.set(tlv, offset);
   return output;
+}
+
+function parseIso15693NdefCc(data: Uint8Array): Iso15693NdefFormatInfo {
+  const magic = data[0];
+  if (magic === ISO15693_NDEF_EXTENDED_CC_MAGIC) {
+    if (data.length < 8) {
+      throw new Error("Extended ISO15693 Type 5 capability container requires at least 8 bytes");
+    }
+    const high = data[6] ?? 0;
+    const low = data[7] ?? 0;
+    const memorySize = (high << 8) | low;
+    if (memorySize === 0) {
+      throw new Error("ISO15693 Type 5 capability container has zero T5T area size");
+    }
+
+    return {
+      formatted: true,
+      cc: data.slice(0, 8),
+      ccLength: 8,
+      t5tAreaBytes: memorySize * 8
+    };
+  }
+  if (magic !== ISO15693_NDEF_CC_MAGIC) {
+    return { formatted: false };
+  }
+  if (data.length < 4) {
+    throw new Error("ISO15693 Type 5 capability container requires at least 4 bytes");
+  }
+
+  const memorySize = data[2] ?? 0;
+  if (memorySize === 0) {
+    throw new Error("ISO15693 Type 5 capability container has zero T5T area size");
+  }
+
+  return {
+    formatted: true,
+    cc: data.slice(0, 4),
+    ccLength: 4,
+    t5tAreaBytes: memorySize * 8
+  };
+}
+
+function iso15693NdefCc(t5tAreaBytes: number, featureFlags: number): Uint8Array {
+  if (t5tAreaBytes < 8) {
+    throw new RangeError("ISO15693 Type 5 area must be at least 8 bytes");
+  }
+  if (t5tAreaBytes % 8 !== 0) {
+    throw new RangeError("ISO15693 Type 5 area must be a multiple of 8 bytes");
+  }
+
+  const memorySize = t5tAreaBytes / 8;
+  if (memorySize > 0xff) {
+    throw new RangeError("Default ISO15693 Type 5 formatting supports 4-byte capability containers only; pass a custom 8-byte cc for larger T5T areas");
+  }
+
+  return new Uint8Array([
+    ISO15693_NDEF_CC_MAGIC,
+    ISO15693_NDEF_CC_VERSION_ACCESS,
+    memorySize,
+    featureFlags
+  ]);
+}
+
+function normalizeIso15693NdefCc(cc: string | Uint8Array): Uint8Array {
+  const normalized = normalizeHex(cc, { minBytes: 4, maxBytes: 8 });
+  const byteLength = normalized.length / 2;
+  if (byteLength !== 4 && byteLength !== 8) {
+    throw new RangeError("ISO15693 Type 5 capability container must be 4 or 8 bytes");
+  }
+
+  return hexToByteArray(normalized);
+}
+
+function iso15693T5tAreaBytes(maxBlocks: number, blockSize: number, ccLength: number): number {
+  const availableBytes = maxBlocks * blockSize - ccLength;
+  const alignedBytes = Math.floor(availableBytes / 8) * 8;
+  if (alignedBytes < 8) {
+    throw new RangeError("ISO15693 NDEF area must be at least 8 bytes after the capability container");
+  }
+
+  return alignedBytes;
 }
 
 function hasCompleteNdefTlv(hex: string): boolean {

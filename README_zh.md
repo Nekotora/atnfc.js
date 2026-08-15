@@ -150,11 +150,13 @@ await nfc.writeNtag(4, "00112233445566778899AABB");
 
 ### NDEF / URL / Wi-Fi / vCard
 
-业务代码不想关心当前卡是 NTAG21x 还是 Mifare Classic 时，直接用通用 NDEF 辅助方法。`target` 不传时，client 会先调用 `findCard(31)`，然后把 NTAG 卡分流到 `AT+NTAGREAD` / `AT+NTAGWRITE`，把 M1 卡分流到认证后的 `AT+M1READ` / `AT+M1WRITE` 块读写。
+业务代码不想关心当前卡是 NTAG21x、Mifare Classic 还是 ISO15693 时，直接用通用 NDEF 辅助方法。`target` 不传时，client 会先调用 `findCard(31)`，然后把 NTAG 卡分流到 `AT+NTAGREAD` / `AT+NTAGWRITE`，把 M1 卡分流到认证后的 `AT+M1READ` / `AT+M1WRITE` 块读写，把 ISO15693 卡按 NFC Forum Type 5 Tag 的 CC/TLV 布局分流到 `AT+15693READ` / `AT+15693WRITE`。
 
 `findCard()` 返回 `typeName === "mifare-classic"` 的 M1 卡不能使用 `AT+NTAGREAD`。M1 分流会认证数据块、跳过 sector trailer，并解析同样的 NDEF TLV。默认 M1 NDEF 数据区 key 为 `D3F7D3F7D3F7`；空白/测试卡也会尝试 `FFFFFFFFFFFF`，格式化状态检查会额外尝试公开 MAD key `A0A1A2A3A4A5`。
 
 手机要稳定识别 M1 NDEF，卡上还需要 MIFARE Application Directory（MAD）把扇区标记成 NFC 数据区。第三方应用推荐传 `m1: { mode: "auto" }`：SDK 会先检查 M1 是否已经格式化，只有未格式化时才会先格式化再写入。这个模式可能重写 MAD 块和 sector trailer，所以只应在应用允许管理的卡上使用。
+
+ISO15693 NDEF 要求 0 块存在 NFC Forum Type 5 capability container。已经格式化的标签可以用默认 `preserve` 模式直接写；空白 Type 5 标签需要传 `iso15693: { mode: "format", maxBlocks, blockSize }` 或 `mode: "auto"`，让 SDK 先写 CC 再写 NDEF TLV。默认按 4 字节块、64 块处理；如果卡的块大小或容量不同，务必覆盖参数。新格式化默认使用更保守的 CC feature byte `00`；只有明确知道卡支持对应 Type 5 特性时，才传 `featureFlags` 或 `cc`。
 
 ```ts
 import { encodeTextRecord } from "atnfc.js";
@@ -217,6 +219,15 @@ await nfc.writeUrl("https://example.com", {
     startBlock: 4,
     maxBlocks: 45,
     mode: "auto"
+  }
+});
+
+await nfc.writeUrl("https://example.com", {
+  target: "iso15693",
+  iso15693: {
+    mode: "auto",
+    maxBlocks: 64,
+    blockSize: 4
   }
 });
 

@@ -31,6 +31,8 @@ export type {
   ExchangeOptions,
   FindCardResult,
   InfoResult,
+  Iso15693NdefReadOptions,
+  Iso15693NdefWriteOptions,
   KeyboardMode,
   KeyType,
   MifareClassicNdefFormatOptions,

@@ -98,7 +98,7 @@ export interface SetSysConfigOptions {
 
 export type KeyType = "A" | "B";
 
-export type NdefTarget = "auto" | "ntag" | "m1";
+export type NdefTarget = "auto" | "ntag" | "m1" | "iso15693";
 
 export interface NtagNdefReadOptions {
   startPage?: number;
@@ -136,12 +136,28 @@ export interface MifareClassicNdefFormatOptions {
   ndefSectors?: number;
 }
 
+export interface Iso15693NdefReadOptions {
+  startBlock?: number;
+  blocks?: number;
+  blockSize?: number;
+}
+
+export interface Iso15693NdefWriteOptions {
+  startBlock?: number;
+  maxBlocks?: number;
+  blockSize?: number;
+  mode?: "preserve" | "format" | "auto";
+  featureFlags?: number;
+  cc?: string | Uint8Array;
+}
+
 export interface NdefReadOptions {
   target?: NdefTarget;
   card?: FindCardResult;
   findFilter?: number;
   ntag?: NtagNdefReadOptions;
   m1?: MifareClassicNdefReadOptions;
+  iso15693?: Iso15693NdefReadOptions;
 }
 
 export interface NdefWriteOptions {
@@ -150,6 +166,7 @@ export interface NdefWriteOptions {
   findFilter?: number;
   ntag?: NtagNdefWriteOptions;
   m1?: MifareClassicNdefWriteOptions;
+  iso15693?: Iso15693NdefWriteOptions;
 }
 
 export interface ExchangeOptions {

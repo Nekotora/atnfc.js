@@ -75,7 +75,7 @@ function App() {
   const [hidStatus, setHidStatus] = useState("-");
   const [ndefStartPage, setNdefStartPage] = useState(4);
   const [ndefPages, setNdefPages] = useState(40);
-  const [ndefTarget, setNdefTarget] = useState<"auto" | "ntag" | "m1">("auto");
+  const [ndefTarget, setNdefTarget] = useState<"auto" | "ntag" | "m1" | "iso15693">("auto");
   const [m1NdefKey, setM1NdefKey] = useState(M1_NDEF_PUBLIC_KEY);
   const [m1WriteMode, setM1WriteMode] = useState<"preserve" | "auto" | "format">("auto");
   const [ndefRecords, setNdefRecords] = useState<DecodedNdefRecord[]>([]);
@@ -101,6 +101,14 @@ function App() {
     if (!supported) return "unsupported";
     return state;
   }, [state, supported]);
+
+  const ndefAddressLabel = ndefTarget === "ntag" ? "Page" : "Block";
+  const iso15693NdefReadOptions = ndefTarget === "iso15693"
+    ? { startBlock: ndefStartPage, blocks: ndefPages }
+    : undefined;
+  const iso15693NdefWriteOptions = ndefTarget === "iso15693"
+    ? { startBlock: ndefStartPage, maxBlocks: ndefPages, mode: m1WriteMode }
+    : undefined;
 
   function appendLog(kind: LogEntry["kind"], message: string) {
     setLogs((current) => [
@@ -345,19 +353,20 @@ function App() {
                 <option value="auto">Auto</option>
                 <option value="ntag">NTAG</option>
                 <option value="m1">M1</option>
+                <option value="iso15693">ISO15693</option>
               </select>
             </label>
             <TextField label="M1 Key A" value={m1NdefKey} onChange={setM1NdefKey} />
             <label className="field">
-              <span>M1 Mode</span>
+              <span>Write Mode</span>
               <select value={m1WriteMode} onChange={(event) => setM1WriteMode(event.target.value as typeof m1WriteMode)} disabled={ndefTarget === "ntag"}>
                 <option value="auto">Auto</option>
                 <option value="preserve">Preserve</option>
                 <option value="format">Format</option>
               </select>
             </label>
-            <NumberField label={ndefTarget === "m1" ? "Block" : "Page"} value={ndefStartPage} onChange={setNdefStartPage} />
-            <NumberField label={ndefTarget === "m1" ? "Blocks" : "Pages"} value={ndefPages} onChange={setNdefPages} />
+            <NumberField label={ndefAddressLabel} value={ndefStartPage} onChange={setNdefStartPage} />
+            <NumberField label={ndefTarget === "ntag" ? "Pages" : "Blocks"} value={ndefPages} onChange={setNdefPages} />
           </div>
           <div className="rowActions compact">
             <button
@@ -365,7 +374,8 @@ function App() {
                 const records = await active.readNdef({
                   target: ndefTarget,
                   ntag: { startPage: ndefStartPage, pages: ndefPages },
-                  m1: { startBlock: ndefStartPage, blocks: ndefPages, ...(m1NdefKeys ? { keys: m1NdefKeys } : {}) }
+                  m1: { startBlock: ndefStartPage, blocks: ndefPages, ...(m1NdefKeys ? { keys: m1NdefKeys } : {}) },
+                  ...(iso15693NdefReadOptions ? { iso15693: iso15693NdefReadOptions } : {})
                 });
                 setNdefRecords(records);
               })}
@@ -383,7 +393,8 @@ function App() {
                   maxBlocks: ndefPages,
                   mode: m1WriteMode,
                   ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
-                }
+                },
+                ...(iso15693NdefWriteOptions ? { iso15693: iso15693NdefWriteOptions } : {})
               }))}
               disabled={!client || busy}
               title="Write text NDEF"
@@ -400,7 +411,7 @@ function App() {
                   }));
                 }
               }}
-              disabled={!client || busy || ndefTarget === "ntag"}
+              disabled={!client || busy || ndefTarget !== "m1"}
               title="Format M1 as NDEF"
             >
               <Save size={18} /> Format
@@ -434,7 +445,8 @@ function App() {
                   maxBlocks: ndefPages,
                   mode: m1WriteMode,
                   ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
-                }
+                },
+                ...(iso15693NdefWriteOptions ? { iso15693: iso15693NdefWriteOptions } : {})
               }))}
               disabled={!client || busy}
               title="Write URL NDEF"
@@ -470,7 +482,8 @@ function App() {
                     maxBlocks: ndefPages,
                     mode: m1WriteMode,
                     ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
-                  }
+                  },
+                  ...(iso15693NdefWriteOptions ? { iso15693: iso15693NdefWriteOptions } : {})
                 }
               ))}
               disabled={!client || busy}
@@ -499,7 +512,8 @@ function App() {
                     maxBlocks: ndefPages,
                     mode: m1WriteMode,
                     ...(m1NdefKeys ? { keys: m1NdefKeys } : {})
-                  }
+                  },
+                  ...(iso15693NdefWriteOptions ? { iso15693: iso15693NdefWriteOptions } : {})
                 }
               ))}
               disabled={!client || busy}

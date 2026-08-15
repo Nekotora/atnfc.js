@@ -151,11 +151,13 @@ await nfc.writeNtag(4, "00112233445566778899AABB");
 
 ### NDEF / URL / Wi-Fi / vCard
 
-Use the generic NDEF helpers when application code should not care whether the card is NTAG21x or Mifare Classic. The client calls `findCard(31)` when `target` is omitted, then routes NTAG cards to `AT+NTAGREAD` / `AT+NTAGWRITE` and M1 cards to authenticated `AT+M1READ` / `AT+M1WRITE` block access.
+Use the generic NDEF helpers when application code should not care whether the card is NTAG21x, Mifare Classic, or ISO15693. The client calls `findCard(31)` when `target` is omitted, then routes NTAG cards to `AT+NTAGREAD` / `AT+NTAGWRITE`, M1 cards to authenticated `AT+M1READ` / `AT+M1WRITE` block access, and ISO15693 cards to NFC Forum Type 5 Tag CC/TLV storage over `AT+15693READ` / `AT+15693WRITE`.
 
 Mifare Classic cards reported by `findCard()` as `typeName === "mifare-classic"` do not work with `AT+NTAGREAD`. The M1 route authenticates data blocks, skips sector trailer blocks, and parses the same NDEF TLV payload. The default M1 NDEF data key is `D3F7D3F7D3F7`; `FFFFFFFFFFFF` is also tried for blank/test cards, and formatted-state checks try the public MAD key `A0A1A2A3A4A5`.
 
 For phones to discover M1 NDEF reliably, the card must also have a MIFARE Application Directory (MAD) that marks sectors as NFC data. For third-party applications, prefer `m1: { mode: "auto" }`: the SDK checks whether the M1 card is already formatted and formats it before writing only when needed. This may rewrite MAD blocks and sector trailers, so use it only for cards your app is allowed to manage.
+
+ISO15693 NDEF support expects an NFC Forum Type 5 capability container at block 0. Existing formatted tags can be written with the default `preserve` mode. Blank Type 5 tags need `iso15693: { mode: "format", maxBlocks, blockSize }` or `mode: "auto"` so the SDK can write the CC before the NDEF TLV. The defaults are 4-byte blocks and 64 blocks; override them for tags with different memory geometry. New formatting uses a conservative CC feature byte of `00`; pass `featureFlags` or `cc` only when the card's Type 5 feature bits are known.
 
 ```ts
 import { encodeTextRecord } from "atnfc.js";
@@ -218,6 +220,15 @@ await nfc.writeUrl("https://example.com", {
     startBlock: 4,
     maxBlocks: 45,
     mode: "auto"
+  }
+});
+
+await nfc.writeUrl("https://example.com", {
+  target: "iso15693",
+  iso15693: {
+    mode: "auto",
+    maxBlocks: 64,
+    blockSize: 4
   }
 });
 
